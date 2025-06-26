@@ -1,0 +1,16 @@
+Acurácia no Teste: 0.9070
+
+==============================
+RELATÓRIO DE CLASSIFICAÇÃO
+==============================
+              precision    recall  f1-score   support
+
+  Condição 1       0.98      1.00      0.99       200
+  Condição 2       0.93      0.93      0.93       200
+  Condição 3       0.82      0.90      0.85       200
+  Condição 4       0.99      0.99      0.99       200
+  Condição 5       0.81      0.72      0.77       200
+
+    accuracy                           0.91      1000
+   macro avg       0.91      0.91      0.91      1000
+weighted avg       0.91      0.91      0.91      1000

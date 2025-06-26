@@ -13,6 +13,7 @@ from sklearn.model_selection import train_test_split, GridSearchCV, learning_cur
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.inspection import permutation_importance
+import csv
 
 warnings.filterwarnings('ignore')
 
@@ -41,17 +42,17 @@ class SVMSystem:
                 print(f"Falha ao deletar {file_path}. Razão: {e}")
 
     def load_data_from_folders(self, folder_paths, class_names):
-        """Carrega dados de um número variável de pastas, tentando extrair nomes das features do cabeçalho."""
+        """Carrega dados considerando cada arquivo CSV como um segmento único (linha de features), com detecção automática de separador e robustez a cabeçalhos/linhas vazias."""
         all_features = []
         all_labels = []
-        
+        arquivos_invalidos = []
+        arquivos_validos_por_pasta = []
+        feature_names_from_header = None
+        expected_num_features = None
+
         if not folder_paths or len(folder_paths) != len(class_names):
             raise ValueError("O número de pastas e nomes de classes não corresponde ou está vazio.")
-            
         self.class_names = class_names
-        
-        expected_num_features = None
-        feature_names_from_header = None # Guardará os nomes das features do cabeçalho
 
         for i, folder_path in enumerate(folder_paths):
             if not folder_path or not os.path.isdir(folder_path):
@@ -61,73 +62,75 @@ class SVMSystem:
             if not files:
                 raise ValueError(f"Nenhum arquivo .csv encontrado na pasta para a Condição {i+1}: {folder_path}")
 
+            validos_pasta = 0
             for file in files:
                 file_path = os.path.join(folder_path, file)
                 try:
-                    # TENTATIVA 1: Assumir que não há cabeçalho e o arquivo é puramente numérico.
-                    df_attempt1 = pd.read_csv(file_path, header=None)
-                    numeric_df_attempt1 = df_attempt1.apply(pd.to_numeric, errors='coerce')
-
-                    if not numeric_df_attempt1.isnull().values.any():
-                        # SUCESSO na Tentativa 1: O arquivo é puramente numérico.
-                        segment_data = numeric_df_attempt1.values.flatten()
-                    else:
-                        # TENTATIVA 2: Falha na primeira tentativa, assumir que há um cabeçalho.
-                        print(f"Aviso: Texto detectado em '{file}'. Tentando processar com cabeçalho...")
-                        df_attempt2 = pd.read_csv(file_path, header=0) # Trata a primeira linha como cabeçalho
-                        
-                        # Se ainda não capturamos os nomes das features, fazemos agora.
-                        if feature_names_from_header is None:
-                            feature_names_from_header = df_attempt2.columns.tolist()
-
-                        numeric_df_attempt2 = df_attempt2.apply(pd.to_numeric, errors='coerce')
-
-                        if not numeric_df_attempt2.isnull().values.any():
-                            # SUCESSO na Tentativa 2: Cabeçalho removido com sucesso.
-                            print(f"  -> Sucesso: Cabeçalho de '{file}' processado e arquivo carregado.")
-                            segment_data = numeric_df_attempt2.values.flatten()
-                        else:
-                            # FALHA FINAL: O arquivo contém dados não numéricos mesmo após remover o cabeçalho.
-                            print(f"  -> Falha: O arquivo '{file}' contém dados inválidos e será ignorado.")
-                            continue # Pula este arquivo problemático
-
-                    # Se o número de features ainda não foi definido, usa o deste arquivo
-                    if expected_num_features is None:
-                        if segment_data.shape[0] > 0:
-                            expected_num_features = segment_data.shape[0]
-                            print(f"Sistema detectou {expected_num_features} features por segmento.")
-                        else:
-                            print(f"Aviso: Arquivo {file} está vazio ou inválido. Ignorando.")
-                            continue # Pula para o próximo arquivo
-
-                    # Verifica se o segmento atual tem o número de features esperado
-                    if segment_data.shape[0] != expected_num_features:
-                        print(f"Aviso: O arquivo {file} tem {segment_data.shape[0]} features, mas o esperado é {expected_num_features}. Arquivo ignorado.")
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        sample = f.read(2048)
+                        sniffer = csv.Sniffer()
+                        try:
+                            dialect = sniffer.sniff(sample)
+                            sep = dialect.delimiter
+                        except Exception:
+                            sep = ','
+                    df = pd.read_csv(file_path, sep=sep, header=0, skip_blank_lines=True)
+                    if df.shape[0] == 0:
+                        df = pd.read_csv(file_path, sep=sep, header=None, skip_blank_lines=True)
+                    linha_valida = None
+                    for idx, row in df.iterrows():
+                        if not pd.isnull(row).all():
+                            linha_valida = row
+                            break
+                    if linha_valida is None:
+                        arquivos_invalidos.append((file, 'Arquivo vazio ou sem linhas de dados.'))
                         continue
-                        
-                    all_features.append(segment_data)
-                    all_labels.append(i) # Rótulo da classe (0 a 3)
+                    # Seleciona apenas as colunas numéricas
+                    valores_numericos = []
+                    nomes_numericos = []
+                    for col, val in zip(linha_valida.index, linha_valida.values):
+                        try:
+                            v = float(val)
+                            if not pd.isnull(v):
+                                valores_numericos.append(v)
+                                nomes_numericos.append(str(col))
+                        except Exception:
+                            continue
+                    if not valores_numericos:
+                        arquivos_invalidos.append((file, f'Nenhuma coluna numérica detectada na linha: {linha_valida.values}'))
+                        continue
+                    if expected_num_features is None:
+                        expected_num_features = len(valores_numericos)
+                        if feature_names_from_header is None:
+                            feature_names_from_header = nomes_numericos
+                    if len(valores_numericos) != expected_num_features:
+                        arquivos_invalidos.append((file, f'Número de features numéricas ({len(valores_numericos)}) diferente do esperado ({expected_num_features}).'))
+                        continue
+                    all_features.append(valores_numericos)
+                    all_labels.append(i)
+                    validos_pasta += 1
                 except Exception as e:
-                    print(f"Erro crítico ao processar o arquivo '{file}': {e}. Ignorando.")
+                    arquivos_invalidos.append((file, f'Erro crítico: {e}'))
+            arquivos_validos_por_pasta.append((class_names[i], validos_pasta, len(files)))
 
         if not all_features:
-            raise ValueError("Nenhum dado válido foi carregado. Verifique os arquivos CSV e sua consistência.")
-            
+            msg = 'Nenhum dado válido foi carregado.\nResumo dos problemas encontrados:\n'
+            for pasta, validos, total in arquivos_validos_por_pasta:
+                msg += f'- {pasta}: {validos} de {total} arquivos válidos\n'
+            if arquivos_invalidos:
+                msg += '\nArquivos rejeitados e motivo:\n'
+                for arq, motivo in arquivos_invalidos:
+                    msg += f'  {arq}: {motivo}\n'
+            raise ValueError(msg)
         X = np.array(all_features)
         y = np.array(all_labels)
-
-        # Define os nomes das features: usa os do cabeçalho se forem válidos, senão, usa genéricos.
         if feature_names_from_header and len(feature_names_from_header) == X.shape[1]:
-            print("Usando nomes das features extraídos do cabeçalho do arquivo CSV.")
             self.feature_names = feature_names_from_header
         else:
-            if feature_names_from_header:
-                print("Aviso: Nomes das features do cabeçalho não correspondem à quantidade de dados. Usando nomes genéricos.")
             self.feature_names = [f"Feature_{j+1}" for j in range(X.shape[1])]
-        
         return X, y
 
-    def prepare_data(self, X, y, test_size=0.3, random_state=42):
+    def prepare_data(self, X, y, test_size=0.2, random_state=42):
         """Divide os dados em treino/teste e normaliza."""
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
             X, y, test_size=test_size, random_state=random_state, stratify=y
@@ -344,39 +347,67 @@ class SVMSystem:
         print(f"Curva de aprendizado salva em: {plot_path}")
         return plot_path
 
+    def plot_hardest_feature_distribution(self, X, y):
+        import seaborn as sns
+        import pandas as pd
+        import matplotlib.pyplot as plt
+        ranking_path = os.path.join(self.results_path, 'ranking_features_utilizadas.txt')
+        feature_name = None
+        # Lê o arquivo de ranking linha a linha e pega a última feature do ranking
+        with open(ranking_path, 'r', encoding='utf-8') as f:
+            lines = [line.strip() for line in f if line.strip() and line[0].isdigit()]
+            if lines:
+                last_line = lines[-1]
+                # Exemplo de linha: '7. feature_name: 0.0123'
+                parts = last_line.split('. ', 1)
+                if len(parts) == 2:
+                    feature_name = parts[1].split(':')[0].strip()
+        if not feature_name or feature_name not in self.feature_names:
+            print('Feature menos importante não encontrada nos dados.')
+            return
+        # Monta DataFrame para plot
+        df = pd.DataFrame(X, columns=self.feature_names)
+        df['classe'] = y
+        plt.figure(figsize=(10,6))
+        sns.violinplot(x='classe', y=feature_name, data=df, inner='quartile', palette='Set2')
+        plt.title(f'Distribuição da feature mais difícil: {feature_name}\n(Sobreposição entre as classes)')
+        plt.xlabel('Classe')
+        plt.ylabel(feature_name)
+        plt.tight_layout()
+        plot_path = os.path.join(self.results_path, 'distribuicao_feature_mais_dificil.png')
+        plt.savefig(plot_path)
+        plt.close()
+        print(f'Gráfico de distribuição salvo em: {plot_path}')
+
 # --- Frontend: Interface Gráfica ---
 class SVM_GUI:
     def __init__(self, root):
         self.root = root
         self.svm_system = SVMSystem()
-        self.folder_paths = [tk.StringVar() for _ in range(5)]
-        self.class_name_vars = [tk.StringVar() for _ in range(5)]
+        self.folder_paths = [tk.StringVar() for _ in range(7)]
+        self.class_name_vars = [tk.StringVar() for _ in range(7)]
         self.class_input_frames = [] # Container para os widgets de input
         self.setup_gui()
 
     def setup_gui(self):
-        """Configura a interface gráfica com layout profissional e número de classes flexível."""
         self.root.title("GVA/NAAT - Sistema de Classificação SVM")
-        self.root.geometry("950x800")
+        self.root.geometry("1050x820")
+        self.root.configure(bg='#f5f5f5')
 
-        # --- Estilo ---
         style = ttk.Style()
         style.theme_use('clam')
-        style.configure("TLabel", font=('Arial', 10))
+        style.configure("TLabel", font=('Arial', 10), background='#f5f5f5')
         style.configure("TButton", font=('Arial', 10, 'bold'), padding=5)
         style.configure("TEntry", font=('Arial', 10))
-        style.configure("TFrame")
-        style.configure("TLabelframe", padding=10, relief="solid", borderwidth=1)
-        style.configure("TLabelframe.Label", font=('Arial', 12, 'bold'))
+        style.configure("TFrame", background='#f5f5f5')
+        style.configure("TLabelframe", padding=10, relief="solid", borderwidth=1, background='#f5f5f5')
+        style.configure("TLabelframe.Label", font=('Arial', 12, 'bold'), background='#f5f5f5')
 
-        # --- Layout Principal ---
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # --- Header com Logos ---
         header_frame = ttk.Frame(main_frame)
         header_frame.pack(fill=tk.X, pady=(0, 15))
-        
         try:
             gva_img = Image.open("gva.jpg").resize((150, 75), Image.LANCZOS)
             self.gva_photo = ImageTk.PhotoImage(gva_img)
@@ -385,10 +416,8 @@ class SVM_GUI:
         except FileNotFoundError:
             gva_label = ttk.Label(header_frame, text="GVA Logo\n(gva.jpg não encontrado)")
             gva_label.pack(side=tk.LEFT, padx=10, pady=5)
-
-        title_label = ttk.Label(header_frame, text="Classificador SVM Multiclasse", font=('Arial', 20, 'bold'))
+        title_label = ttk.Label(header_frame, text="Classificador SVM Multiclasse", font=('Arial', 22, 'bold'), background='#f5f5f5', foreground='#1976d2')
         title_label.pack(side=tk.LEFT, expand=True)
-
         try:
             naat_img = Image.open("naat.jpg").resize((100, 75), Image.LANCZOS)
             self.naat_photo = ImageTk.PhotoImage(naat_img)
@@ -397,16 +426,14 @@ class SVM_GUI:
         except FileNotFoundError:
             naat_label = ttk.Label(header_frame, text="NAAT Logo\n(naat.jpg não encontrado)")
             naat_label.pack(side=tk.RIGHT, padx=10, pady=5)
-        
-        # --- Frame de Configuração (Dados e Parâmetros) ---
+
+        # --- Painel de configuração ---
         config_frame = ttk.Frame(main_frame)
         config_frame.pack(fill=tk.X, pady=10, anchor=tk.N)
 
-        # --- Seção de Carregamento de Dados ---
+        # Esquerda: Carregamento de Dados
         data_frame = ttk.LabelFrame(config_frame, text="1. Carregamento de Dados")
         data_frame.pack(side=tk.LEFT, fill=tk.X, padx=(0, 10), expand=True)
-
-        #--- Widget para selecionar número de classes ---
         num_classes_frame = ttk.Frame(data_frame)
         num_classes_frame.pack(fill=tk.X, padx=5, pady=(0, 10))
         ttk.Label(num_classes_frame, text="Número de Classes:").pack(side=tk.LEFT)
@@ -414,47 +441,37 @@ class SVM_GUI:
         num_classes_combo = ttk.Combobox(
             num_classes_frame,
             textvariable=self.num_classes_var,
-            values=[2, 3, 4, 5],
+            values=[2, 3, 4, 5, 6, 7],
             state="readonly",
             width=5
         )
         num_classes_combo.pack(side=tk.LEFT, padx=5)
         num_classes_combo.bind("<<ComboboxSelected>>", self.update_class_inputs)
-
-        # Container para os inputs das classes
         inputs_container = ttk.Frame(data_frame)
         inputs_container.pack(fill=tk.X)
-
-        for i in range(5):
-            # Usar um frame para cada linha para melhor alinhamento
+        for i in range(7):
             row_frame = ttk.Frame(inputs_container)
-
             self.class_name_vars[i].set(f"Condição {i+1}")
-
             ttk.Label(row_frame, text=f"Pasta da Condição {i+1}:", width=18).pack(side=tk.LEFT)
-            
             entry = ttk.Entry(row_frame, textvariable=self.folder_paths[i])
             entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-            
             btn = ttk.Button(row_frame, text="Selecionar...", command=lambda i=i: self.select_folder(i))
             btn.pack(side=tk.LEFT, padx=5)
-            
             ttk.Label(row_frame, text="Nome:").pack(side=tk.LEFT, padx=(10, 5))
             name_entry = ttk.Entry(row_frame, textvariable=self.class_name_vars[i], width=20)
             name_entry.pack(side=tk.LEFT, padx=(0, 5))
-
             self.class_input_frames.append(row_frame)
 
-        # --- Seção de Otimização ---
-        params_frame = ttk.LabelFrame(config_frame, text="2. Otimização")
-        params_frame.pack(side=tk.LEFT, fill=tk.BOTH)
-        
-        info_text = "Os melhores hiperparâmetros\n(C e Gamma) serão encontrados\nautomaticamente via GridSearch\ncom Validação Cruzada."
-        info_label = ttk.Label(params_frame, text=info_text, justify=tk.CENTER, font=('Arial', 10, 'italic'))
-        info_label.pack(expand=True, padx=20, pady=20)
-
-        # Atualiza a visibilidade inicial dos inputs
-        self.update_class_inputs()
+        # Direita: Seleção de Features
+        self.features_frame = ttk.LabelFrame(config_frame, text="2. Seleção de Features para Treinamento")
+        self.features_frame.pack(side=tk.LEFT, fill=tk.BOTH, padx=(10, 0), ipadx=10, ipady=10)
+        ttk.Label(self.features_frame, text="Selecione as features desejadas para o treinamento do modelo:", font=('Arial', 10, 'italic')).pack(anchor='w', padx=10, pady=(5, 0))
+        self.listbox_features = tk.Listbox(self.features_frame, selectmode='multiple', width=35, height=10, exportselection=False, font=('Arial', 10, 'bold'), bg='#e3f2fd', fg='#1976d2', relief='groove', bd=2)
+        self.listbox_features.pack(side='left', padx=(10,0), pady=10, fill='y')
+        self.scrollbar_features = ttk.Scrollbar(self.features_frame, orient='vertical', command=self.listbox_features.yview)
+        self.scrollbar_features.pack(side='right', fill='y', padx=(0,10), pady=10)
+        self.listbox_features.config(yscrollcommand=self.scrollbar_features.set)
+        self.features_disponiveis = []
 
         # --- Frame de Controle e Resultados ---
         results_main_frame = ttk.Frame(main_frame)
@@ -471,6 +488,9 @@ class SVM_GUI:
         ttk.Button(action_buttons_frame, text="Carregar e Processar Dados", command=self.load_and_process).pack(side=tk.LEFT, padx=5)
         ttk.Button(action_buttons_frame, text="Treinar Modelo", command=self.train_model).pack(side=tk.LEFT, padx=5)
         ttk.Button(action_buttons_frame, text="Avaliar Modelo", command=self.evaluate_model).pack(side=tk.LEFT, padx=5)
+        # Botão de predição de novos dados (inicialmente desabilitado)
+        self.btn_predizer = ttk.Button(action_buttons_frame, text="Predizer Novos Dados", command=self.predict_new_data, state=tk.DISABLED)
+        self.btn_predizer.pack(side=tk.LEFT, padx=5)
 
         # Frame para botões de utilidade (agrupados à direita)
         utility_frame = ttk.Frame(control_frame)
@@ -525,6 +545,14 @@ class SVM_GUI:
             X, y = self.svm_system.load_data_from_folders(paths, names)
             self.log(f"Total de {X.shape[0]} amostras carregadas de {len(names)} classes, com {X.shape[1]} features.")
             
+            # Preencher lista de features para seleção
+            self.features_disponiveis = self.svm_system.feature_names
+            self.listbox_features.delete(0, tk.END)
+            for feat in self.features_disponiveis:
+                self.listbox_features.insert(tk.END, feat)
+            self.features_frame.pack(fill=tk.X, padx=10, pady=(0, 10))  # Agora garante que aparece
+            self.log("Selecione as features desejadas na lista acima antes de treinar o modelo.")
+            
             self.svm_system.prepare_data(X, y)
             self.log("Dados divididos em conjuntos de treino e teste e normalizados.")
             self.log(f"- Treino: {self.svm_system.X_train.shape[0]} amostras.")
@@ -538,6 +566,19 @@ class SVM_GUI:
             self.status_var.set("Erro ao carregar dados.")
 
     def train_model(self):
+        # Antes de treinar, filtrar X_train e X_test pelas features selecionadas
+        indices = self.listbox_features.curselection()
+        if not indices:
+            messagebox.showerror('Erro', 'Selecione ao menos uma feature na lista para treinar.')
+            return
+        features_escolhidas = [self.features_disponiveis[i] for i in indices]
+        # Filtra os dados do SVMSystem
+        idxs = [self.svm_system.feature_names.index(f) for f in features_escolhidas]
+        self.svm_system.X_train = self.svm_system.X_train[:, idxs]
+        self.svm_system.X_test = self.svm_system.X_test[:, idxs]
+        self.svm_system.feature_names = features_escolhidas
+        # Continua fluxo normal
+        self.log(f"Features selecionadas para treinamento: {', '.join(features_escolhidas)}")
         if self.svm_system.X_train is None:
             messagebox.showerror("Erro", "Carregue e processe os dados primeiro.")
             return
@@ -589,6 +630,11 @@ class SVM_GUI:
             self.status_var.set(f"Avaliação concluída. Acurácia de teste: {accuracy:.4f}")
             messagebox.showinfo("Avaliação Concluída", f"Resultados e gráfico de features salvos em '{self.svm_system.results_path}'.\nAcurácia no teste: {accuracy:.4f}")
 
+            # Gerar gráfico de distribuição da feature menos importante
+            self.svm_system.plot_hardest_feature_distribution(self.svm_system.X_test, self.svm_system.y_test)
+            # Habilita o botão de predição
+            self.btn_predizer.config(state=tk.NORMAL)
+
         except Exception as e:
             messagebox.showerror("Erro na Avaliação", str(e))
             self.log(f"ERRO: {e}\n")
@@ -610,7 +656,7 @@ class SVM_GUI:
             self.svm_system = SVMSystem()
 
             # 3. Reseta a GUI
-            for i in range(5):
+            for i in range(7):
                 self.folder_paths[i].set("")
                 self.class_name_vars[i].set(f"Condição {i+1}")
             
@@ -636,6 +682,235 @@ class SVM_GUI:
             # Para Linux/Mac
             import subprocess
             subprocess.Popen(['xdg-open', path])
+
+    def predict_new_data(self):
+        if self.svm_system.model is None:
+            messagebox.showerror("Erro", "Treine e avalie o modelo antes de predizer novos dados.")
+            return
+        pasta = filedialog.askdirectory(title="Selecione a pasta com arquivos CSV para predição")
+        if not pasta:
+            return
+        arquivos = [f for f in os.listdir(pasta) if f.endswith('.csv')]
+        if not arquivos:
+            messagebox.showerror("Erro", "Nenhum arquivo CSV encontrado na pasta selecionada.")
+            return
+        self.log(f"\n>>> Iniciando predição de {len(arquivos)} arquivos na pasta: {pasta}")
+        resultados = []
+        predicoes = []
+        confiancas = []
+        for file in arquivos:
+            file_path = os.path.join(pasta, file)
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    sample = f.read(2048)
+                    sniffer = csv.Sniffer()
+                    try:
+                        dialect = sniffer.sniff(sample)
+                        sep = dialect.delimiter
+                    except Exception:
+                        sep = ','
+                df = pd.read_csv(file_path, sep=sep, header=0, skip_blank_lines=True)
+                if df.shape[0] == 0:
+                    df = pd.read_csv(file_path, sep=sep, header=None, skip_blank_lines=True)
+                linha_valida = None
+                for idx, row in df.iterrows():
+                    if not pd.isnull(row).all():
+                        linha_valida = row
+                        break
+                if linha_valida is None:
+                    resultados.append((file, 'Inválido: vazio ou sem dados'))
+                    continue
+                # Seleciona apenas as colunas numéricas
+                valores_numericos = []
+                for col, val in zip(linha_valida.index, linha_valida.values):
+                    try:
+                        v = float(val)
+                        if not pd.isnull(v):
+                            valores_numericos.append(v)
+                    except Exception:
+                        continue
+                if len(valores_numericos) != len(self.svm_system.feature_names):
+                    resultados.append((file, f'Inválido: número de features ({len(valores_numericos)}) diferente do esperado ({len(self.svm_system.feature_names)})'))
+                    continue
+                X_pred = np.array(valores_numericos).reshape(1, -1)
+                X_pred = self.svm_system.scaler.transform(X_pred)
+                pred = self.svm_system.model.predict(X_pred)[0]
+                # Obter probabilidades para análise de confiança
+                probas = self.svm_system.model.predict_proba(X_pred)[0]
+                confianca = np.max(probas)
+                classe = self.svm_system.class_names[pred]
+                resultados.append((file, classe))
+                predicoes.append(pred)
+                confiancas.append(confianca)
+            except Exception as e:
+                resultados.append((file, f'Erro: {e}'))
+        
+        # Exibe e salva resultados
+        self.log("\n--- Resultados da Predição ---")
+        for arq, classe in resultados:
+            self.log(f"{arq}: {classe}")
+        
+        # Gera matriz de confusão secundária e estatísticas
+        if predicoes:
+            self.generate_prediction_analysis(predicoes, confiancas, resultados)
+        
+        # Salva em TXT e CSV
+        txt_path = os.path.join(self.svm_system.results_path, 'resultados_predicao.txt')
+        csv_path = os.path.join(self.svm_system.results_path, 'resultados_predicao.csv')
+        with open(txt_path, 'w', encoding='utf-8') as f:
+            f.write("RESULTADOS DA PREDIÇÃO DE NOVOS DADOS\n")
+            f.write("=" * 50 + "\n\n")
+            for arq, classe in resultados:
+                f.write(f"{arq}: {classe}\n")
+        
+        # DataFrame com resultados detalhados incluindo confiança
+        df_resultados = pd.DataFrame({
+            'Arquivo': [r[0] for r in resultados if 'Inválido' not in r[1] and 'Erro' not in r[1]],
+            'Classe_Prevista': [r[1] for r in resultados if 'Inválido' not in r[1] and 'Erro' not in r[1]],
+            'Confianca': [f"{c:.4f}" for c in confiancas]
+        })
+        df_resultados.to_csv(csv_path, index=False)
+        
+        self.log(f"Resultados salvos em: {txt_path} e {csv_path}\n")
+        messagebox.showinfo("Predição Concluída", f"Predição realizada para {len(resultados)} arquivos. Resultados salvos em '{self.svm_system.results_path}'.")
+
+    def generate_prediction_analysis(self, predicoes, confiancas, resultados):
+        """Gera análise detalhada das predições incluindo matriz de confusão secundária."""
+        from collections import Counter
+        
+        # Conta predições por classe
+        contador_predicoes = Counter(predicoes)
+        
+        # Estatísticas de confiança
+        confianca_media = np.mean(confiancas)
+        confianca_min = np.min(confiancas)
+        confianca_max = np.max(confiancas)
+        
+        # Gera matriz de distribuição das predições
+        plt.figure(figsize=(12, 8))
+        
+        # Subplot 1: Distribuição das predições por classe
+        plt.subplot(2, 2, 1)
+        classes = list(contador_predicoes.keys())
+        contagens = list(contador_predicoes.values())
+        # Usar nomes personalizados das classes
+        nomes_classes = [self.svm_system.class_names[classe] for classe in classes]
+        cores = plt.cm.Set3(np.linspace(0, 1, len(classes)))
+        plt.bar(nomes_classes, contagens, color=cores)
+        plt.title('Distribuição das Predições por Classe')
+        plt.xlabel('Classe')
+        plt.ylabel('Número de Arquivos')
+        plt.xticks(rotation=45)
+        
+        # Subplot 2: Histograma de confiança
+        plt.subplot(2, 2, 2)
+        plt.hist(confiancas, bins=20, alpha=0.7, color='skyblue', edgecolor='black')
+        plt.axvline(confianca_media, color='red', linestyle='--', label=f'Média: {confianca_media:.3f}')
+        plt.title('Distribuição da Confiança das Predições')
+        plt.xlabel('Confiança')
+        plt.ylabel('Frequência')
+        plt.legend()
+        
+        # Subplot 3: Confiança por classe
+        plt.subplot(2, 2, 3)
+        confianca_por_classe = {}
+        for pred, conf in zip(predicoes, confiancas):
+            if pred not in confianca_por_classe:
+                confianca_por_classe[pred] = []
+            confianca_por_classe[pred].append(conf)
+        
+        classes_conf = list(confianca_por_classe.keys())
+        medias_conf = [np.mean(confianca_por_classe[c]) for c in classes_conf]
+        # Usar nomes personalizados das classes
+        nomes_classes_conf = [self.svm_system.class_names[classe] for classe in classes_conf]
+        plt.bar(nomes_classes_conf, medias_conf, color='lightgreen')
+        plt.title('Confiança Média por Classe')
+        plt.xlabel('Classe')
+        plt.ylabel('Confiança Média')
+        plt.xticks(rotation=45)
+        
+        # Subplot 4: Resumo estatístico
+        plt.subplot(2, 2, 4)
+        plt.axis('off')
+        texto_resumo = f"""
+RESUMO DA PREDIÇÃO:
+==================
+Total de arquivos processados: {len(resultados)}
+Arquivos válidos: {len(predicoes)}
+Arquivos inválidos: {len(resultados) - len(predicoes)}
+
+ESTATÍSTICAS DE CONFIANÇA:
+=========================
+Confiança mínima: {confianca_min:.4f}
+Confiança máxima: {confianca_max:.4f}
+Confiança média: {confianca_media:.4f}
+
+DISTRIBUIÇÃO POR CLASSE:
+=======================
+"""
+        for classe, contagem in contador_predicoes.items():
+            porcentagem = (contagem / len(predicoes)) * 100
+            nome_classe = self.svm_system.class_names[classe]
+            texto_resumo += f"{nome_classe}: {contagem} ({porcentagem:.1f}%)\n"
+        
+        plt.text(0.1, 0.9, texto_resumo, transform=plt.gca().transAxes, 
+                fontsize=10, verticalalignment='top', fontfamily='monospace')
+        
+        plt.tight_layout()
+        plot_path = os.path.join(self.svm_system.results_path, 'analise_predicao.png')
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # Salva relatório detalhado
+        relatorio_path = os.path.join(self.svm_system.results_path, 'relatorio_predicao.txt')
+        with open(relatorio_path, 'w', encoding='utf-8') as f:
+            f.write("RELATÓRIO DETALHADO DA PREDIÇÃO\n")
+            f.write("=" * 50 + "\n\n")
+            f.write(f"Data/Hora: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Modelo treinado com: {len(self.svm_system.feature_names)} features\n")
+            f.write(f"Features utilizadas: {', '.join(self.svm_system.feature_names)}\n\n")
+            
+            f.write("ESTATÍSTICAS GERAIS:\n")
+            f.write("-" * 30 + "\n")
+            f.write(f"Total de arquivos processados: {len(resultados)}\n")
+            f.write(f"Arquivos válidos: {len(predicoes)}\n")
+            f.write(f"Arquivos inválidos: {len(resultados) - len(predicoes)}\n\n")
+            
+            f.write("ESTATÍSTICAS DE CONFIANÇA:\n")
+            f.write("-" * 30 + "\n")
+            f.write(f"Confiança mínima: {confianca_min:.4f}\n")
+            f.write(f"Confiança máxima: {confianca_max:.4f}\n")
+            f.write(f"Confiança média: {confianca_media:.4f}\n")
+            f.write(f"Desvio padrão: {np.std(confiancas):.4f}\n\n")
+            
+            f.write("DISTRIBUIÇÃO POR CLASSE:\n")
+            f.write("-" * 30 + "\n")
+            for classe, contagem in contador_predicoes.items():
+                porcentagem = (contagem / len(predicoes)) * 100
+                conf_media_classe = np.mean([conf for pred, conf in zip(predicoes, confiancas) if pred == classe])
+                nome_classe = self.svm_system.class_names[classe]
+                f.write(f"{nome_classe}:\n")
+                f.write(f"  - Quantidade: {contagem} ({porcentagem:.1f}%)\n")
+                f.write(f"  - Confiança média: {conf_media_classe:.4f}\n\n")
+            
+            f.write("ARQUIVOS COM BAIXA CONFIANÇA (< 0.7):\n")
+            f.write("-" * 40 + "\n")
+            arquivos_baixa_conf = [(r[0], conf) for r, conf in zip(resultados, confiancas) 
+                                 if 'Inválido' not in r[1] and 'Erro' not in r[1] and conf < 0.7]
+            if arquivos_baixa_conf:
+                for arq, conf in arquivos_baixa_conf:
+                    f.write(f"{arq}: {conf:.4f}\n")
+            else:
+                f.write("Nenhum arquivo com confiança baixa encontrado.\n")
+        
+        self.log(f"Análise detalhada salva em: {plot_path}")
+        self.log(f"Relatório detalhado salvo em: {relatorio_path}")
+        self.log(f"Confiança média das predições: {confianca_media:.4f}")
+        
+        # Log com nomes personalizados das classes
+        distribuicao_nomes = {self.svm_system.class_names[classe]: contagem 
+                            for classe, contagem in contador_predicoes.items()}
+        self.log(f"Distribuição das predições: {distribuicao_nomes}")
 
 
 if __name__ == "__main__":

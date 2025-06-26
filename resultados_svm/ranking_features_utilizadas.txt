@@ -1,0 +1,13 @@
+RANKING DE IMPORTÂNCIA DAS FEATURES UTILIZADAS NO MODELO
+============================================================
+
+Total de features utilizadas: 5
+Features: rms, desvio_padrao, minimo, pico_a_pico, mean_abs
+
+Ranking por Importância:
+----------------------------------------
+1. rms: 0.5555
+2. pico_a_pico: 0.5359
+3. minimo: 0.4716
+4. desvio_padrao: 0.4684
+5. mean_abs: 0.4611
