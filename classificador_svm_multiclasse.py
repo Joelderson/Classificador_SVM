@@ -11,7 +11,7 @@ import seaborn as sns
 from sklearn.svm import SVC
 from sklearn.model_selection import train_test_split, GridSearchCV, learning_curve
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 from sklearn.inspection import permutation_importance
 import csv
 
@@ -131,14 +131,39 @@ class SVMSystem:
         return X, y
 
     def prepare_data(self, X, y, test_size=0.2, random_state=42):
-        """Divide os dados em treino/teste e normaliza."""
+        """Divide os dados em treino/teste e normaliza, evitando data leakage. Escolhe automaticamente a melhor normalização."""
+        from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
             X, y, test_size=test_size, random_state=random_state, stratify=y
         )
-        
-        self.scaler = StandardScaler()
+        # Testa diferentes normalizações
+        scalers = {
+            'StandardScaler': StandardScaler(),
+            'MinMaxScaler': MinMaxScaler(),
+            'RobustScaler': RobustScaler()
+        }
+        melhor_scaler = None
+        melhor_nome = None
+        melhor_score = float('inf')
+        for nome, scaler in scalers.items():
+            X_train_scaled = scaler.fit_transform(self.X_train)
+            # Critério: menor soma dos desvios absolutos da média (ideal: média 0, std 1 para Standard, faixa [0,1] para MinMax, robustez para Robust)
+            if nome == 'StandardScaler':
+                score = abs(X_train_scaled.mean()) + abs(X_train_scaled.std() - 1)
+            elif nome == 'MinMaxScaler':
+                score = abs(X_train_scaled.min()) + abs(X_train_scaled.max() - 1)
+            elif nome == 'RobustScaler':
+                # RobustScaler: menor influência de outliers, usa mediana e IQR
+                score = abs(np.median(X_train_scaled)) + abs(np.percentile(X_train_scaled, 75) - np.percentile(X_train_scaled, 25) - 1)
+            if score < melhor_score:
+                melhor_score = score
+                melhor_scaler = scaler
+                melhor_nome = nome
+        # Aplica o melhor scaler
+        self.scaler = melhor_scaler
         self.X_train = self.scaler.fit_transform(self.X_train)
         self.X_test = self.scaler.transform(self.X_test)
+        self.normalization_used = melhor_nome
 
     def train_model(self):
         """Treina o modelo SVM com Kernel RBF usando GridSearchCV para encontrar os melhores hiperparâmetros."""
@@ -379,6 +404,8 @@ class SVMSystem:
         plt.close()
         print(f'Gráfico de distribuição salvo em: {plot_path}')
 
+
+
 # --- Frontend: Interface Gráfica ---
 class SVM_GUI:
     def __init__(self, root):
@@ -488,9 +515,6 @@ class SVM_GUI:
         ttk.Button(action_buttons_frame, text="Carregar e Processar Dados", command=self.load_and_process).pack(side=tk.LEFT, padx=5)
         ttk.Button(action_buttons_frame, text="Treinar Modelo", command=self.train_model).pack(side=tk.LEFT, padx=5)
         ttk.Button(action_buttons_frame, text="Avaliar Modelo", command=self.evaluate_model).pack(side=tk.LEFT, padx=5)
-        # Botão de predição de novos dados (inicialmente desabilitado)
-        self.btn_predizer = ttk.Button(action_buttons_frame, text="Predizer Novos Dados", command=self.predict_new_data, state=tk.DISABLED)
-        self.btn_predizer.pack(side=tk.LEFT, padx=5)
 
         # Frame para botões de utilidade (agrupados à direita)
         utility_frame = ttk.Frame(control_frame)
@@ -557,8 +581,9 @@ class SVM_GUI:
             self.log("Dados divididos em conjuntos de treino e teste e normalizados.")
             self.log(f"- Treino: {self.svm_system.X_train.shape[0]} amostras.")
             self.log(f"- Teste: {self.svm_system.X_test.shape[0]} amostras.")
-            self.log("Pronto para treinar o modelo.\n")
-            self.status_var.set("Dados carregados com sucesso. Pronto para treinar.")
+            # Feedback da normalização
+            self.log(f"Normalização utilizada: {self.svm_system.normalization_used}")
+            self.status_var.set(f"Dados carregados e normalizados com {self.svm_system.normalization_used}. Pronto para treinar.")
 
         except Exception as e:
             messagebox.showerror("Erro no Carregamento", str(e))
@@ -632,8 +657,6 @@ class SVM_GUI:
 
             # Gerar gráfico de distribuição da feature menos importante
             self.svm_system.plot_hardest_feature_distribution(self.svm_system.X_test, self.svm_system.y_test)
-            # Habilita o botão de predição
-            self.btn_predizer.config(state=tk.NORMAL)
 
         except Exception as e:
             messagebox.showerror("Erro na Avaliação", str(e))
@@ -683,234 +706,7 @@ class SVM_GUI:
             import subprocess
             subprocess.Popen(['xdg-open', path])
 
-    def predict_new_data(self):
-        if self.svm_system.model is None:
-            messagebox.showerror("Erro", "Treine e avalie o modelo antes de predizer novos dados.")
-            return
-        pasta = filedialog.askdirectory(title="Selecione a pasta com arquivos CSV para predição")
-        if not pasta:
-            return
-        arquivos = [f for f in os.listdir(pasta) if f.endswith('.csv')]
-        if not arquivos:
-            messagebox.showerror("Erro", "Nenhum arquivo CSV encontrado na pasta selecionada.")
-            return
-        self.log(f"\n>>> Iniciando predição de {len(arquivos)} arquivos na pasta: {pasta}")
-        resultados = []
-        predicoes = []
-        confiancas = []
-        for file in arquivos:
-            file_path = os.path.join(pasta, file)
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    sample = f.read(2048)
-                    sniffer = csv.Sniffer()
-                    try:
-                        dialect = sniffer.sniff(sample)
-                        sep = dialect.delimiter
-                    except Exception:
-                        sep = ','
-                df = pd.read_csv(file_path, sep=sep, header=0, skip_blank_lines=True)
-                if df.shape[0] == 0:
-                    df = pd.read_csv(file_path, sep=sep, header=None, skip_blank_lines=True)
-                linha_valida = None
-                for idx, row in df.iterrows():
-                    if not pd.isnull(row).all():
-                        linha_valida = row
-                        break
-                if linha_valida is None:
-                    resultados.append((file, 'Inválido: vazio ou sem dados'))
-                    continue
-                # Seleciona apenas as colunas numéricas
-                valores_numericos = []
-                for col, val in zip(linha_valida.index, linha_valida.values):
-                    try:
-                        v = float(val)
-                        if not pd.isnull(v):
-                            valores_numericos.append(v)
-                    except Exception:
-                        continue
-                if len(valores_numericos) != len(self.svm_system.feature_names):
-                    resultados.append((file, f'Inválido: número de features ({len(valores_numericos)}) diferente do esperado ({len(self.svm_system.feature_names)})'))
-                    continue
-                X_pred = np.array(valores_numericos).reshape(1, -1)
-                X_pred = self.svm_system.scaler.transform(X_pred)
-                pred = self.svm_system.model.predict(X_pred)[0]
-                # Obter probabilidades para análise de confiança
-                probas = self.svm_system.model.predict_proba(X_pred)[0]
-                confianca = np.max(probas)
-                classe = self.svm_system.class_names[pred]
-                resultados.append((file, classe))
-                predicoes.append(pred)
-                confiancas.append(confianca)
-            except Exception as e:
-                resultados.append((file, f'Erro: {e}'))
-        
-        # Exibe e salva resultados
-        self.log("\n--- Resultados da Predição ---")
-        for arq, classe in resultados:
-            self.log(f"{arq}: {classe}")
-        
-        # Gera matriz de confusão secundária e estatísticas
-        if predicoes:
-            self.generate_prediction_analysis(predicoes, confiancas, resultados)
-        
-        # Salva em TXT e CSV
-        txt_path = os.path.join(self.svm_system.results_path, 'resultados_predicao.txt')
-        csv_path = os.path.join(self.svm_system.results_path, 'resultados_predicao.csv')
-        with open(txt_path, 'w', encoding='utf-8') as f:
-            f.write("RESULTADOS DA PREDIÇÃO DE NOVOS DADOS\n")
-            f.write("=" * 50 + "\n\n")
-            for arq, classe in resultados:
-                f.write(f"{arq}: {classe}\n")
-        
-        # DataFrame com resultados detalhados incluindo confiança
-        df_resultados = pd.DataFrame({
-            'Arquivo': [r[0] for r in resultados if 'Inválido' not in r[1] and 'Erro' not in r[1]],
-            'Classe_Prevista': [r[1] for r in resultados if 'Inválido' not in r[1] and 'Erro' not in r[1]],
-            'Confianca': [f"{c:.4f}" for c in confiancas]
-        })
-        df_resultados.to_csv(csv_path, index=False)
-        
-        self.log(f"Resultados salvos em: {txt_path} e {csv_path}\n")
-        messagebox.showinfo("Predição Concluída", f"Predição realizada para {len(resultados)} arquivos. Resultados salvos em '{self.svm_system.results_path}'.")
 
-    def generate_prediction_analysis(self, predicoes, confiancas, resultados):
-        """Gera análise detalhada das predições incluindo matriz de confusão secundária."""
-        from collections import Counter
-        
-        # Conta predições por classe
-        contador_predicoes = Counter(predicoes)
-        
-        # Estatísticas de confiança
-        confianca_media = np.mean(confiancas)
-        confianca_min = np.min(confiancas)
-        confianca_max = np.max(confiancas)
-        
-        # Gera matriz de distribuição das predições
-        plt.figure(figsize=(12, 8))
-        
-        # Subplot 1: Distribuição das predições por classe
-        plt.subplot(2, 2, 1)
-        classes = list(contador_predicoes.keys())
-        contagens = list(contador_predicoes.values())
-        # Usar nomes personalizados das classes
-        nomes_classes = [self.svm_system.class_names[classe] for classe in classes]
-        cores = plt.cm.Set3(np.linspace(0, 1, len(classes)))
-        plt.bar(nomes_classes, contagens, color=cores)
-        plt.title('Distribuição das Predições por Classe')
-        plt.xlabel('Classe')
-        plt.ylabel('Número de Arquivos')
-        plt.xticks(rotation=45)
-        
-        # Subplot 2: Histograma de confiança
-        plt.subplot(2, 2, 2)
-        plt.hist(confiancas, bins=20, alpha=0.7, color='skyblue', edgecolor='black')
-        plt.axvline(confianca_media, color='red', linestyle='--', label=f'Média: {confianca_media:.3f}')
-        plt.title('Distribuição da Confiança das Predições')
-        plt.xlabel('Confiança')
-        plt.ylabel('Frequência')
-        plt.legend()
-        
-        # Subplot 3: Confiança por classe
-        plt.subplot(2, 2, 3)
-        confianca_por_classe = {}
-        for pred, conf in zip(predicoes, confiancas):
-            if pred not in confianca_por_classe:
-                confianca_por_classe[pred] = []
-            confianca_por_classe[pred].append(conf)
-        
-        classes_conf = list(confianca_por_classe.keys())
-        medias_conf = [np.mean(confianca_por_classe[c]) for c in classes_conf]
-        # Usar nomes personalizados das classes
-        nomes_classes_conf = [self.svm_system.class_names[classe] for classe in classes_conf]
-        plt.bar(nomes_classes_conf, medias_conf, color='lightgreen')
-        plt.title('Confiança Média por Classe')
-        plt.xlabel('Classe')
-        plt.ylabel('Confiança Média')
-        plt.xticks(rotation=45)
-        
-        # Subplot 4: Resumo estatístico
-        plt.subplot(2, 2, 4)
-        plt.axis('off')
-        texto_resumo = f"""
-RESUMO DA PREDIÇÃO:
-==================
-Total de arquivos processados: {len(resultados)}
-Arquivos válidos: {len(predicoes)}
-Arquivos inválidos: {len(resultados) - len(predicoes)}
-
-ESTATÍSTICAS DE CONFIANÇA:
-=========================
-Confiança mínima: {confianca_min:.4f}
-Confiança máxima: {confianca_max:.4f}
-Confiança média: {confianca_media:.4f}
-
-DISTRIBUIÇÃO POR CLASSE:
-=======================
-"""
-        for classe, contagem in contador_predicoes.items():
-            porcentagem = (contagem / len(predicoes)) * 100
-            nome_classe = self.svm_system.class_names[classe]
-            texto_resumo += f"{nome_classe}: {contagem} ({porcentagem:.1f}%)\n"
-        
-        plt.text(0.1, 0.9, texto_resumo, transform=plt.gca().transAxes, 
-                fontsize=10, verticalalignment='top', fontfamily='monospace')
-        
-        plt.tight_layout()
-        plot_path = os.path.join(self.svm_system.results_path, 'analise_predicao.png')
-        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        # Salva relatório detalhado
-        relatorio_path = os.path.join(self.svm_system.results_path, 'relatorio_predicao.txt')
-        with open(relatorio_path, 'w', encoding='utf-8') as f:
-            f.write("RELATÓRIO DETALHADO DA PREDIÇÃO\n")
-            f.write("=" * 50 + "\n\n")
-            f.write(f"Data/Hora: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Modelo treinado com: {len(self.svm_system.feature_names)} features\n")
-            f.write(f"Features utilizadas: {', '.join(self.svm_system.feature_names)}\n\n")
-            
-            f.write("ESTATÍSTICAS GERAIS:\n")
-            f.write("-" * 30 + "\n")
-            f.write(f"Total de arquivos processados: {len(resultados)}\n")
-            f.write(f"Arquivos válidos: {len(predicoes)}\n")
-            f.write(f"Arquivos inválidos: {len(resultados) - len(predicoes)}\n\n")
-            
-            f.write("ESTATÍSTICAS DE CONFIANÇA:\n")
-            f.write("-" * 30 + "\n")
-            f.write(f"Confiança mínima: {confianca_min:.4f}\n")
-            f.write(f"Confiança máxima: {confianca_max:.4f}\n")
-            f.write(f"Confiança média: {confianca_media:.4f}\n")
-            f.write(f"Desvio padrão: {np.std(confiancas):.4f}\n\n")
-            
-            f.write("DISTRIBUIÇÃO POR CLASSE:\n")
-            f.write("-" * 30 + "\n")
-            for classe, contagem in contador_predicoes.items():
-                porcentagem = (contagem / len(predicoes)) * 100
-                conf_media_classe = np.mean([conf for pred, conf in zip(predicoes, confiancas) if pred == classe])
-                nome_classe = self.svm_system.class_names[classe]
-                f.write(f"{nome_classe}:\n")
-                f.write(f"  - Quantidade: {contagem} ({porcentagem:.1f}%)\n")
-                f.write(f"  - Confiança média: {conf_media_classe:.4f}\n\n")
-            
-            f.write("ARQUIVOS COM BAIXA CONFIANÇA (< 0.7):\n")
-            f.write("-" * 40 + "\n")
-            arquivos_baixa_conf = [(r[0], conf) for r, conf in zip(resultados, confiancas) 
-                                 if 'Inválido' not in r[1] and 'Erro' not in r[1] and conf < 0.7]
-            if arquivos_baixa_conf:
-                for arq, conf in arquivos_baixa_conf:
-                    f.write(f"{arq}: {conf:.4f}\n")
-            else:
-                f.write("Nenhum arquivo com confiança baixa encontrado.\n")
-        
-        self.log(f"Análise detalhada salva em: {plot_path}")
-        self.log(f"Relatório detalhado salvo em: {relatorio_path}")
-        self.log(f"Confiança média das predições: {confianca_media:.4f}")
-        
-        # Log com nomes personalizados das classes
-        distribuicao_nomes = {self.svm_system.class_names[classe]: contagem 
-                            for classe, contagem in contador_predicoes.items()}
-        self.log(f"Distribuição das predições: {distribuicao_nomes}")
 
 
 if __name__ == "__main__":
