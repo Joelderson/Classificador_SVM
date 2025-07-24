@@ -1,17 +1,18 @@
 RANKING DE IMPORTÂNCIA DAS FEATURES UTILIZADAS NO MODELO
 ============================================================
 
-Total de features utilizadas: 9
-Features: rms, media, desvio_padrao, minimo, skewness, kurtosis, pico_a_pico, shape_factor, mean_abs
+Total de features utilizadas: 10
+Features: rms, media, desvio_padrao, minimo, skewness, kurtosis, pico_a_pico, crest_factor, shape_factor, mean_abs
 
 Ranking por Importância:
 ----------------------------------------
-1. minimo: 0.3428
-2. pico_a_pico: 0.3392
-3. rms: 0.3230
-4. desvio_padrao: 0.3211
-5. mean_abs: 0.3189
-6. media: 0.1666
-7. shape_factor: 0.1191
-8. kurtosis: 0.1117
-9. skewness: 0.0937
+1. crest_factor: 0.3830
+2. shape_factor: 0.3367
+3. rms: 0.3190
+4. mean_abs: 0.3053
+5. media: 0.1881
+6. kurtosis: 0.1500
+7. minimo: 0.0897
+8. pico_a_pico: 0.0566
+9. skewness: 0.0213
+10. desvio_padrao: 0.0172
